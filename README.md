@@ -1,6 +1,18 @@
 # EfficientNet 二分类训练项目
 
-本项目基于 PyTorch + timm 的 EfficientNet 做图像分类训练，并提供数据准备、压缩与推理 API。
+本项目基于 PyTorch + timm 的 EfficientNet 做图像二分类训练（普通卡 `card` vs. 折页卡 `booklet`），并提供数据准备、压缩与推理 API。
+
+> 运行环境：Python >= 3.13；依赖通过 `uv` 管理。
+
+## 文件与脚本速览
+- `dataset.py`：数据集类、数据增强与 `create_dataloaders`。
+- `prepare_data.py`：按 9:1 划分 train/val，输入 `label-images/` 输出 `dataset/`（card/booklet 二分类）。
+- `compress_dataset.py`：多线程压缩 train/val 图像，输出 `dataset_compressed/`。
+- `train.py`：训练主循环（timm EfficientNet + AdamW + CosineAnnealingLR + MLflow 记录，二分类）。
+- `predict_api.py`：Flask 推理服务，读取 `checkpoints/best.pth`。
+- `main.py`：占位入口，可按需扩展。
+- `pyproject.toml` / `uv.lock`：依赖与锁定文件。
+- `.gitignore` / `.python-version`：基础环境约定。
 
 ## 项目能力
 - EfficientNet 训练（timm）
@@ -17,15 +29,12 @@ uv sync
 ```
 
 ## 数据准备
-默认数据目录约定如下：
+默认数据目录约定如下（仅两类）：
 
 ```text
 label-images/
-├── back/
-├── detail/
-├── front/
-├── lot/
-└── other/
+├── card/
+└── booklet/
 ```
 
 切分训练/验证集：
@@ -39,9 +48,9 @@ uv run python prepare_data.py
 ```text
 dataset/
 ├── train/
-│   ├── back/ detail/ front/ lot/ other/
+│   ├── card/ booklet/
 └── val/
-    ├── back/ detail/ front/ lot/ other/
+    ├── card/ booklet/
 ```
 
 ## 数据压缩（可选）
@@ -72,6 +81,11 @@ uv run python predict_api.py
 - `POST /predict` 传入 `{ "url": "..." }`
 - `POST /predict_batch` 传入 `{ "urls": ["...", "..."] }`
 
+## 快速排错
+- 如果训练/推理报找不到类别，确认 `dataset.py` 的类别列表（card/booklet）与数据目录一致。
+- 预测报找不到 checkpoint，先运行训练或将权重放到 `checkpoints/best.pth`。
+- MLflow 连接失败：检查 `train.py` 中 `mlflow.set_tracking_uri` 是否可达。
+
 ## 代码结构（当前）
 - `train.py`：训练主脚本（EfficientNet + MLflow）
 - `dataset.py`：数据集与数据增强定义
@@ -79,8 +93,9 @@ uv run python predict_api.py
 - `compress_dataset.py`：图片压缩加速训练
 - `predict_api.py`：推理服务（Flask）
 - `pyproject.toml` / `uv.lock`：依赖管理
+- `main.py`：占位入口（当前仅打印欢迎信息，可按需扩展）
 
 ## 约定与注意
-- 类别固定为 `back/detail/front/lot/other`（如需改动，同步修改 `dataset.py` 与数据准备脚本）。
+- 类别固定为 `card/booklet`（如需改动，同步修改 `dataset.py` 与数据准备脚本）。
 - 训练默认使用 `dataset_compressed/`，如未生成请修改 `train.py` 的 `data_dir`。
 - 若调整目录结构或新增脚本，请同步更新本 README。

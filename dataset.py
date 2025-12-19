@@ -17,7 +17,7 @@ class TradingCardDataset(Dataset):
         """
         self.data_dir = Path(data_dir)
         self.transform = transform
-        self.classes = ['back', 'detail', 'front', 'lot', 'other']  # 按字母顺序
+        self.classes = ['card','booklet']  # 按字母顺序
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
 
         # 收集所有图片路径和标签

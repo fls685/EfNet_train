@@ -19,7 +19,7 @@ class EfficientNetTrainer:
     def __init__(
         self,
         model_name='efficientnet_b0',
-        num_classes=4,
+        num_classes=2,
         img_size=224,
         batch_size=32,
         num_workers=4,
@@ -276,7 +276,7 @@ def main():
     # 创建训练器
     trainer = EfficientNetTrainer(
         model_name='efficientnet_b0',
-        num_classes=5,  # 5分类: back, detail, front, lot, other
+        num_classes=2,  # 2分类: card, booklet
         img_size=224,
         batch_size=128,  # RTX 4090 有其他进程占用，保持128
         num_workers=8,   # 44核CPU，8个worker绰绰有余

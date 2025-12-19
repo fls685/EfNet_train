@@ -108,6 +108,14 @@ def compress_images(source_dir='dataset', target_dir='dataset_compressed', max_s
 
                         pbar.update(1)
 
+    # 若未处理到任何图片，提前返回避免除零
+    if total_size_before == 0:
+        print("\n" + "="*60)
+        print("未找到可压缩的图片，请确认已运行 prepare_data.py 且 source_dir 中包含 train/val 子目录及图片。")
+        print(f"检查路径: {source_path}")
+        print("="*60)
+        return
+
     # 统计
     print("\n" + "="*60)
     print("压缩完成！")

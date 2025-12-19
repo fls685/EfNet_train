@@ -17,7 +17,7 @@ app = Flask(__name__)
 # 全局变量
 model = None
 device = None
-classes = ['back', 'detail', 'front', 'other']
+classes = ['card', 'booklet']
 transform = None
 
 
@@ -125,13 +125,11 @@ def predict():
     返回:
     {
         "success": true,
-        "predicted_class": "front",
+        "predicted_class": "card",
         "confidence": 0.9523,
         "probabilities": {
-            "back": 0.0123,
-            "detail": 0.0234,
-            "front": 0.9523,
-            "other": 0.0120
+            "card": 0.9523,
+            "booklet": 0.0477
         }
     }
     """

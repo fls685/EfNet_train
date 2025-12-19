@@ -6,11 +6,12 @@
 - 目录结构或脚本有调整时，请同步更新 `README.md` 与本文件。
 
 ## 项目现状与约定
-- 训练脚本：`train.py`（timm EfficientNet + MLflow）
-- 数据准备：`prepare_data.py`（从 `label-images/` 切分到 `dataset/`）
+- 训练脚本：`train.py`（timm EfficientNet + MLflow，二分类 card/booklet）
+- 数据准备：`prepare_data.py`（从 `label-images/` 切分到 `dataset/`，card/booklet）
 - 数据压缩：`compress_dataset.py`（输出 `dataset_compressed/`）
 - 推理服务：`predict_api.py`（Flask，使用 `checkpoints/best.pth`）
-- 类别固定：`back/detail/front/lot/other`
+- 类别固定：`card/booklet`
+- 其他：`main.py` 为占位入口，可自行扩展
 
 ## 目录约定
 - 原始标注数据：`label-images/<class>/`
@@ -25,3 +26,5 @@
   - 同步修改 `train.py` 的 `data_dir`，并更新 README。
 - 若新增脚本或 API：
   - 请在 README 增补用途与调用方式。
+- 若增加/删除文件或目录：
+  - 在 README 的“文件与脚本速览”更新对应描述，保持与仓库一致。

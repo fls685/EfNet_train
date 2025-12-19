@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+#dataset
+label-images/
+dataset_compressed/
+dataset/
+checkpoints/
+

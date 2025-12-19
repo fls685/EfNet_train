@@ -6,10 +6,10 @@ from tqdm import tqdm
 
 def prepare_dataset(source_dir='label-images', output_dir='dataset', train_ratio=0.9, seed=42):
     """
-    将标注数据按9:1划分为训练集和验证集
+    将标注数据按9:1划分为训练集和验证集（card/booklet 二分类）
 
     Args:
-        source_dir: 源数据目录，包含front/back/detail/other四个子目录
+        source_dir: 源数据目录，包含 card 与 booklet 两个子目录
         output_dir: 输出目录
         train_ratio: 训练集比例
         seed: 随机种子
@@ -21,7 +21,7 @@ def prepare_dataset(source_dir='label-images', output_dir='dataset', train_ratio
     train_dir = output_path / 'train'
     val_dir = output_path / 'val'
 
-    classes = ['front', 'back', 'detail', 'other', 'lot']
+    classes = ['card', 'booklet']
 
     print(f"准备数据集，训练集比例: {train_ratio:.1%}")
     print("=" * 60)
@@ -36,7 +36,7 @@ def prepare_dataset(source_dir='label-images', output_dir='dataset', train_ratio
         # 获取所有图片文件（排除._开头的隐藏文件）
         image_files = [
             f for f in cls_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in ['.jpg', '.jpeg', '.png']
+            if f.is_file() and f.suffix.lower() in ['.jpg', '.jpeg', '.png','.webp']
             and not f.name.startswith('._')
         ]
 
