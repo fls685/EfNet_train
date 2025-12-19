@@ -28,7 +28,7 @@ class TradingCardDataset(Dataset):
                 continue
 
             for img_path in cls_dir.iterdir():
-                if img_path.suffix.lower() in ['.jpg', '.jpeg', '.png']:
+                if img_path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']:
                     self.samples.append((str(img_path), self.class_to_idx[cls_name]))
 
     def __len__(self):

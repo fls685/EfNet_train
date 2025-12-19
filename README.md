@@ -29,7 +29,7 @@ uv sync
 ```
 
 ## 数据准备
-默认数据目录约定如下（仅两类）：
+默认数据目录约定如下（仅两类，支持 jpg/jpeg/png/webp）：
 
 ```text
 label-images/

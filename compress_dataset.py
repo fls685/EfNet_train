@@ -31,11 +31,14 @@ def compress_single_image(args):
             img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         # 保存压缩图片
-        cv2.imwrite(
-            str(target_path_img),
-            img,
-            [cv2.IMWRITE_JPEG_QUALITY, quality]
-        )
+        # 根据后缀选择编码参数（JPEG/WEBP）
+        ext = img_path.suffix.lower()
+        if ext == '.webp':
+            encode_params = [cv2.IMWRITE_WEBP_QUALITY, quality]
+        else:
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
+
+        cv2.imwrite(str(target_path_img), img, encode_params)
 
         size_after = target_path_img.stat().st_size
         return size_before, size_after, None
@@ -83,7 +86,7 @@ def compress_images(source_dir='dataset', target_dir='dataset_compressed', max_s
             target_cls_dir.mkdir(parents=True, exist_ok=True)
 
             # 获取所有图片
-            images = [f for f in cls_dir.iterdir() if f.suffix.lower() in ['.jpg', '.jpeg', '.png']]
+            images = [f for f in cls_dir.iterdir() if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']]
 
             # 准备任务参数
             tasks = [
