@@ -9,14 +9,16 @@ import cv2
 class TradingCardDataset(Dataset):
     """eBay球星卡图片分类数据集"""
 
-    def __init__(self, data_dir, transform=None):
+    def __init__(self, data_dir, transform=None, return_path=False):
         """
         Args:
             data_dir: 数据目录路径（train或val）
             transform: albumentations transform
+            return_path: 是否在getitem返回图片路径，便于评测/导出
         """
         self.data_dir = Path(data_dir)
         self.transform = transform
+        self.return_path = return_path
         self.classes = ['card','booklet']  # 按字母顺序
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
 
@@ -39,6 +41,8 @@ class TradingCardDataset(Dataset):
 
         # 使用cv2读取图片（albumentations需要），忽略iCCP警告
         image = cv2.imread(img_path, cv2.IMREAD_IGNORE_ORIENTATION | cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError(f"无法读取图片: {img_path}（可能文件损坏或格式不被当前OpenCV支持）")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         # 应用数据增强
@@ -46,6 +50,8 @@ class TradingCardDataset(Dataset):
             transformed = self.transform(image=image)
             image = transformed['image']
 
+        if self.return_path:
+            return image, label, img_path
         return image, label
 
 
