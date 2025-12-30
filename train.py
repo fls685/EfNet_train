@@ -1,294 +1,336 @@
+"""
+多任务/二分类训练脚本
+
+特性：
+- 读取 dataset_config.json，按配置的列与任务加载标签
+- 共享 EfficientNet 骨干，按任务名自动创建独立二分类头
+- 适配单任务（二分类）与多任务（多头）统一流程
+"""
+
+import argparse
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import mlflow
+import mlflow.pytorch
+import numpy as np
+import timm
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import timm
 from tqdm import tqdm
-import mlflow
-import mlflow.pytorch
-from pathlib import Path
-import numpy as np
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
-from dataset import create_dataloaders
-from datetime import datetime
+
+from dataset import create_dataloaders_from_config, load_dataset_config
 
 
-class EfficientNetTrainer:
-    """EfficientNet训练器，集成MLflow跟踪"""
+# =======================
+# 模型定义
+# =======================
 
+class MultiTaskEfficientNet(nn.Module):
+    def __init__(self, backbone: str, task_names: List[str], pretrained: bool = True):
+        super().__init__()
+        self.task_names = task_names
+        self.backbone = timm.create_model(
+            backbone,
+            pretrained=pretrained,
+            num_classes=0,
+            global_pool="avg",
+        )
+        feat_dim = self.backbone.num_features
+        self.heads = nn.ModuleDict({
+            t: nn.Linear(feat_dim, 1) for t in task_names
+        })
+
+    def forward(self, x) -> Dict[str, torch.Tensor]:
+        feat = self.backbone(x)
+        out = {t: self.heads[t](feat).squeeze(1) for t in self.task_names}
+        return out
+
+
+# =======================
+# 训练器
+# =======================
+
+class Trainer:
     def __init__(
         self,
-        model_name='efficientnet_b0',
-        num_classes=2,
-        img_size=224,
-        batch_size=32,
-        num_workers=4,
-        learning_rate=1e-3,
-        weight_decay=1e-4,
-        num_epochs=50,
-        device=None,
-        data_dir='dataset',
-        checkpoint_dir='checkpoints'
+        config_path: str,
+        model_name: str = "efficientnet_b0",
+        img_size: int = 224,
+        batch_size: int = 64,
+        num_workers: int = 4,
+        learning_rate: float = 1e-3,
+        weight_decay: float = 1e-4,
+        num_epochs: int = 30,
+        device: str = None,
+        checkpoint_dir: str = "checkpoints",
     ):
+        self.cfg = load_dataset_config(Path(config_path))
         self.model_name = model_name
-        self.num_classes = num_classes
         self.img_size = img_size
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.num_epochs = num_epochs
-        self.data_dir = data_dir
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(exist_ok=True)
 
-        # 设置设备
+        # device
         if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
-
         print(f"使用设备: {self.device}")
 
-        # 创建数据加载器
-        self.train_loader, self.val_loader, self.classes = create_dataloaders(
-            data_dir=data_dir,
+        # dataloader
+        self.train_loader, self.val_loader, self.task_names, _ = create_dataloaders_from_config(
+            config_path=config_path,
             batch_size=batch_size,
             num_workers=num_workers,
-            img_size=img_size
+            img_size=img_size,
         )
 
-        # 创建模型
-        self.model = self._create_model()
-
-        # 损失函数和优化器
-        self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
-
-        # 学习率调度器
-        self.scheduler = CosineAnnealingLR(
-            self.optimizer,
-            T_max=num_epochs,
-            eta_min=1e-6
-        )
-
-        # 最佳验证准确率
-        self.best_val_acc = 0.0
-
-    def _create_model(self):
-        """创建timm EfficientNet模型"""
-        model = timm.create_model(
-            self.model_name,
+        # model / loss / optim
+        self.model = MultiTaskEfficientNet(
+            backbone=model_name,
+            task_names=self.task_names,
             pretrained=True,
-            num_classes=self.num_classes
-        )
-        model = model.to(self.device)
-        print(f"创建模型: {self.model_name}")
-        return model
+        ).to(self.device)
 
-    def train_epoch(self, epoch):
-        """训练一个epoch"""
+        self.criterion = nn.BCEWithLogitsLoss()
+        self.optimizer = optim.AdamW(
+            self.model.parameters(), lr=learning_rate, weight_decay=weight_decay
+        )
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=num_epochs, eta_min=1e-6)
+
+        self.best_val_score = 0.0  # 以平均 F1 作为早停指标
+
+    # --------- metric helpers ----------
+    @staticmethod
+    def _collect_preds(outputs: Dict[str, torch.Tensor], targets: torch.Tensor, task_names: List[str]):
+        """将张量转为 numpy 供 metric 计算"""
+        probs = {}
+        preds = {}
+        labels = {}
+        targets_np = targets.detach().cpu().numpy()
+        for idx, t in enumerate(task_names):
+            logit = outputs[t].detach().cpu()
+            prob = torch.sigmoid(logit).numpy()
+            pred = (prob >= 0.5).astype(np.int32)
+            probs[t] = prob
+            preds[t] = pred
+            labels[t] = targets_np[:, idx]
+        return probs, preds, labels
+
+    @staticmethod
+    def _compute_metrics(preds: Dict[str, np.ndarray], labels: Dict[str, np.ndarray]) -> Dict[str, float]:
+        task_metrics = {}
+        f1_list = []
+        for t in preds:
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                labels[t], preds[t], average="binary", zero_division=0
+            )
+            acc = accuracy_score(labels[t], preds[t])
+            task_metrics[f"{t}_precision"] = precision
+            task_metrics[f"{t}_recall"] = recall
+            task_metrics[f"{t}_f1"] = f1
+            task_metrics[f"{t}_acc"] = acc
+            f1_list.append(f1)
+        task_metrics["f1_macro"] = float(np.mean(f1_list))
+        return task_metrics
+
+    # --------- epoch loops ----------
+    def train_epoch(self, epoch: int):
         self.model.train()
         running_loss = 0.0
         all_preds = []
         all_labels = []
 
-        pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.num_epochs} [Train]')
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.num_epochs} [Train]")
 
-        for images, labels in pbar:
+        for images, targets in pbar:
             images = images.to(self.device)
-            labels = labels.to(self.device)
+            targets = targets.to(self.device)
 
-            # 前向传播
             self.optimizer.zero_grad()
             outputs = self.model(images)
-            loss = self.criterion(outputs, labels)
 
-            # 反向传播
+            loss = 0.0
+            for idx, t in enumerate(self.task_names):
+                loss += self.criterion(outputs[t], targets[:, idx])
+
             loss.backward()
             self.optimizer.step()
 
-            # 统计
             running_loss += loss.item()
-            _, preds = torch.max(outputs, 1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
 
-            # 更新进度条
-            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+            # 收集指标
+            _, preds_dict, labels_dict = self._collect_preds(outputs, targets, self.task_names)
+            all_preds.append(preds_dict)
+            all_labels.append(labels_dict)
 
-        # 计算epoch指标
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+        # 汇总指标
+        merged_preds = {t: np.concatenate([p[t] for p in all_preds], axis=0) for t in self.task_names}
+        merged_labels = {t: np.concatenate([l[t] for l in all_labels], axis=0) for t in self.task_names}
+        metrics = self._compute_metrics(merged_preds, merged_labels)
         epoch_loss = running_loss / len(self.train_loader)
-        epoch_acc = accuracy_score(all_labels, all_preds)
 
-        return epoch_loss, epoch_acc
+        return epoch_loss, metrics
 
-    def validate(self, epoch):
-        """验证"""
+    def validate(self, epoch: int):
         self.model.eval()
         running_loss = 0.0
         all_preds = []
         all_labels = []
 
-        pbar = tqdm(self.val_loader, desc=f'Epoch {epoch+1}/{self.num_epochs} [Val]  ')
+        pbar = tqdm(self.val_loader, desc=f"Epoch {epoch+1}/{self.num_epochs} [Val]")
 
         with torch.no_grad():
-            for images, labels in pbar:
+            for images, targets in pbar:
                 images = images.to(self.device)
-                labels = labels.to(self.device)
+                targets = targets.to(self.device)
 
                 outputs = self.model(images)
-                loss = self.criterion(outputs, labels)
+
+                loss = 0.0
+                for idx, t in enumerate(self.task_names):
+                    loss += self.criterion(outputs[t], targets[:, idx])
 
                 running_loss += loss.item()
-                _, preds = torch.max(outputs, 1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
 
-                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                _, preds_dict, labels_dict = self._collect_preds(outputs, targets, self.task_names)
+                all_preds.append(preds_dict)
+                all_labels.append(labels_dict)
 
-        # 计算指标
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+        merged_preds = {t: np.concatenate([p[t] for p in all_preds], axis=0) for t in self.task_names}
+        merged_labels = {t: np.concatenate([l[t] for l in all_labels], axis=0) for t in self.task_names}
+        metrics = self._compute_metrics(merged_preds, merged_labels)
         epoch_loss = running_loss / len(self.val_loader)
-        epoch_acc = accuracy_score(all_labels, all_preds)
 
-        # 计算每个类别的精确率、召回率、F1
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='weighted', zero_division=0
-        )
+        return epoch_loss, metrics
 
-        # 混淆矩阵
-        cm = confusion_matrix(all_labels, all_preds)
-
-        return {
-            'loss': epoch_loss,
-            'accuracy': epoch_acc,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'confusion_matrix': cm
-        }
-
-    def save_checkpoint(self, epoch, val_acc, is_best=False):
-        """保存检查点"""
+    # --------- checkpoint ----------
+    def save_checkpoint(self, epoch: int, val_score: float, is_best: bool = False):
         checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'val_acc': val_acc,
-            'model_name': self.model_name,
-            'num_classes': self.num_classes,
-            'classes': self.classes,
+            "epoch": epoch,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "val_score": val_score,
+            "model_name": self.model_name,
+            "task_names": self.task_names,
         }
-
-        # 保存最新模型
-        latest_path = self.checkpoint_dir / 'latest.pth'
+        latest_path = self.checkpoint_dir / "latest.pth"
         torch.save(checkpoint, latest_path)
-
-        # 如果是最佳模型，也保存一份
         if is_best:
-            best_path = self.checkpoint_dir / 'best.pth'
+            best_path = self.checkpoint_dir / "best.pth"
             torch.save(checkpoint, best_path)
-            print(f"✓ 保存最佳模型，验证准确率: {val_acc:.4f}")
+            print(f"✓ 保存最佳模型，验证 f1_macro: {val_score:.4f}")
 
+    # --------- main loop ----------
     def train(self):
-        """完整训练流程，集成MLflow"""
-
-        # 生成运行名称：yyyy-MM-dd HH:mm
         run_name = datetime.now().strftime("%Y-%m-%d %H:%M")
+        mlflow.log_params({
+            "model_name": self.model_name,
+            "img_size": self.img_size,
+            "batch_size": self.batch_size,
+            "learning_rate": self.learning_rate,
+            "weight_decay": self.weight_decay,
+            "num_epochs": self.num_epochs,
+            "scheduler": "CosineAnnealingLR",
+            "optimizer": "AdamW",
+            "tasks": ",".join(self.task_names),
+        })
 
-        # 开始MLflow运行
-        with mlflow.start_run(run_name=run_name):
-            # 记录超参数
-            mlflow.log_params({
-                'model_name': self.model_name,
-                'num_classes': self.num_classes,
-                'img_size': self.img_size,
-                'batch_size': self.batch_size,
-                'learning_rate': self.learning_rate,
-                'weight_decay': self.weight_decay,
-                'num_epochs': self.num_epochs,
-                'optimizer': 'AdamW',
-                'scheduler': 'CosineAnnealingLR',
-            })
+        print("\n" + "=" * 60)
+        print("开始训练")
+        print("=" * 60)
 
-            print("\n" + "="*60)
-            print("开始训练")
-            print("="*60)
+        for epoch in range(self.num_epochs):
+            train_loss, train_metrics = self.train_epoch(epoch)
+            val_loss, val_metrics = self.validate(epoch)
 
-            for epoch in range(self.num_epochs):
-                # 训练
-                train_loss, train_acc = self.train_epoch(epoch)
+            current_lr = self.optimizer.param_groups[0]["lr"]
+            self.scheduler.step()
 
-                # 验证
-                val_metrics = self.validate(epoch)
+            # 记录到 MLflow
+            mlflow.log_metrics(
+                {"train_loss": train_loss, "val_loss": val_loss, "learning_rate": current_lr}
+                | {f"train_{k}": v for k, v in train_metrics.items()}
+                | {f"val_{k}": v for k, v in val_metrics.items()},
+                step=epoch,
+            )
 
-                # 更新学习率
-                current_lr = self.optimizer.param_groups[0]['lr']
-                self.scheduler.step()
+            print(f"\nEpoch {epoch+1}/{self.num_epochs} 总结:")
+            print(f"  训练 - Loss: {train_loss:.4f}, f1_macro: {train_metrics['f1_macro']:.4f}")
+            print(f"  验证 - Loss: {val_loss:.4f}, f1_macro: {val_metrics['f1_macro']:.4f}")
+            for t in self.task_names:
+                print(f"    [{t}] P: {val_metrics[f'{t}_precision']:.3f} "
+                      f"R: {val_metrics[f'{t}_recall']:.3f} F1: {val_metrics[f'{t}_f1']:.3f}")
+            print(f"  学习率: {current_lr:.6f}")
 
-                # 记录到MLflow
-                mlflow.log_metrics({
-                    'train_loss': train_loss,
-                    'train_accuracy': train_acc,
-                    'val_loss': val_metrics['loss'],
-                    'val_accuracy': val_metrics['accuracy'],
-                    'val_precision': val_metrics['precision'],
-                    'val_recall': val_metrics['recall'],
-                    'val_f1': val_metrics['f1'],
-                    'learning_rate': current_lr,
-                }, step=epoch)
+            is_best = val_metrics["f1_macro"] > self.best_val_score
+            if is_best:
+                self.best_val_score = val_metrics["f1_macro"]
+            self.save_checkpoint(epoch, val_metrics["f1_macro"], is_best)
+            print("-" * 60)
 
-                # 打印epoch总结
-                print(f"\nEpoch {epoch+1}/{self.num_epochs} 总结:")
-                print(f"  训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.4f}")
-                print(f"  验证 - Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}")
-                print(f"  验证 - Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1']:.4f}")
-                print(f"  学习率: {current_lr:.6f}")
+        mlflow.log_metric("best_val_f1_macro", self.best_val_score)
+        print("\n" + "=" * 60)
+        print(f"训练完成！最佳验证 f1_macro: {self.best_val_score:.4f}")
+        print("=" * 60)
 
-                # 保存检查点
-                is_best = val_metrics['accuracy'] > self.best_val_acc
-                if is_best:
-                    self.best_val_acc = val_metrics['accuracy']
 
-                self.save_checkpoint(epoch, val_metrics['accuracy'], is_best)
+# =======================
+# CLI
+# =======================
 
-                print("-" * 60)
-
-            # 训练结束，记录最佳准确率
-            mlflow.log_metric('best_val_accuracy', self.best_val_acc)
-
-            print("\n" + "="*60)
-            print(f"训练完成！最佳验证准确率: {self.best_val_acc:.4f}")
-            print("="*60)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Multi-task / binary training with config")
+    parser.add_argument("--config", type=str, default="dataset_config.json", help="dataset_config.json 路径")
+    parser.add_argument("--model", type=str, default="efficientnet_b0", help="timm 模型名")
+    parser.add_argument("--img-size", type=int, default=224)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--mlflow-uri", type=str, default="http://127.0.0.1:5500")
+    parser.add_argument("--experiment", type=str, default="trading-card-classification")
+    return parser.parse_args()
 
 
 def main():
-    """主函数"""
-    # 设置MLflow跟踪URI
-    mlflow.set_tracking_uri("http://127.0.0.1:5500")
-    mlflow.set_experiment("trading-card-classification")
+    args = parse_args()
+    mlflow.set_tracking_uri(args.mlflow_uri)
+    mlflow.set_experiment(args.experiment)
 
-    # 创建训练器
-    trainer = EfficientNetTrainer(
-        model_name='efficientnet_b0',
-        num_classes=2,  # 2分类: card, booklet
-        img_size=224,
-        batch_size=128,  # RTX 4090 有其他进程占用，保持128
-        num_workers=8,   # 44核CPU，8个worker绰绰有余
-        learning_rate=1e-3,
-        weight_decay=1e-4,
-        num_epochs=50,
-        data_dir='dataset_compressed',  # 使用压缩后的数据集
-    )
-
-    # 开始训练
-    trainer.train()
+    with mlflow.start_run(run_name=datetime.now().strftime("%Y-%m-%d %H:%M")):
+        trainer = Trainer(
+            config_path=args.config,
+            model_name=args.model,
+            img_size=args.img_size,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            learning_rate=args.lr,
+            weight_decay=args.weight_decay,
+            num_epochs=args.epochs,
+            device=args.device,
+            checkpoint_dir=args.checkpoint_dir,
+        )
+        trainer.train()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
