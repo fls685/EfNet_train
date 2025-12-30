@@ -3,7 +3,10 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from dataset import TradingCardDataset, get_val_transform
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import time
 
+start_time = time.time()
+print(start_time)
 ckpt = torch.load("checkpoints/best.pth", map_location="cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -48,3 +51,7 @@ with torch.no_grad():
 print("Test Acc:", accuracy_score(all_labels, all_preds))
 print("Report:\n", classification_report(all_labels, all_preds, target_names=dataset.classes))
 print("Confusion:\n", confusion_matrix(all_labels, all_preds))
+
+end_time = time.time()
+duration = end_time - start_time
+print(f"脚本运行结束，总耗时: {duration:.2f} 秒")
