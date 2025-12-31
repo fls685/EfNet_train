@@ -135,6 +135,8 @@ uv run python predict_api.py
 - `prepare_data.py`：数据集切分（保留 card/booklet 流程）
 - `compress_dataset.py`：图片压缩加速训练
 - `make_multilabel_csv.py`：五类目录生成多标签 CSV 与 dataset_config.json
+- `infer.py`：推理与文件归档（支持单张或目录，输出预测 CSV 与分标签子目录）
+- `infer.py`：加载 checkpoint，对单张或目录做推理并按预测标签归档
 - `predict_api.py`：推理服务（Flask）
 - `pyproject.toml` / `uv.lock`：依赖管理
 - `main.py`：占位入口（当前仅打印欢迎信息，可按需扩展）
